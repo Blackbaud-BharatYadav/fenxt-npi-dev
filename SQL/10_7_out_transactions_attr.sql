@@ -9,7 +9,7 @@ values ('out_transactions_attr','tmp_tableentry','tmp_start',now(),nvl(to_timest
 
 DROP TABLE IF EXISTS tmp_ids;
 CREATE LOCAL TEMPORARY TABLE tmp_ids (
-                                    TenantId varchar(255) NOT NULL, 
+                                    TenantId varchar(255) NOT NULL encoding rle, 
                                     TranDistributionId int NOT NULL
                                          )
 
@@ -20,17 +20,10 @@ ORDER BY TenantId ,
 
 SEGMENTED BY HASH(TenantId,TranDistributionId) ALL NODES KSAFE 1 ;
 
-ALTER TABLE tmp_ids ADD PRIMARY KEY (TenantId,TranDistributionId) ;
-
 INSERT /*+direct*/ INTO tmp_ids
-
-SELECT 
-TenantId,
-TranDistributionId
-FROM    (SELECT
+SELECT distinct
         ids.TenantId,
-        ids.TranDistributionId,
-        row_number() over (partition by ids.TenantId, ids.TranDistributionId) RowNumber
+        ids.TranDistributionId
         from (
                          select TenantId, TranDistributionId from out_transactions where (TenantId,classid) in (select TenantId, TableEntryId from tmp_tableentry where _sys_updated_at > nvl(to_timestamp(nullif('${PREV_TMP_TS['out_transactions_attr#tmp_tableentry']}',''),'yyyy-mm-dd hh24:mi:ss.us'),'2000-01-01') and _sys_updated_at <= to_timestamp('${LAST_TMP_TS['tmp_tableentry']}','yyyy-mm-dd hh24:mi:ss.us'))
                union all select TenantId, TranDistributionId from out_transactions where (TenantId,TransactionCode1Id) in (select TenantId, TableEntryId from tmp_tableentry where _sys_updated_at > nvl(to_timestamp(nullif('${PREV_TMP_TS['out_transactions_attr#tmp_tableentry']}',''),'yyyy-mm-dd hh24:mi:ss.us'),'2000-01-01') and _sys_updated_at <= to_timestamp('${LAST_TMP_TS['tmp_tableentry']}','yyyy-mm-dd hh24:mi:ss.us'))
@@ -42,11 +35,9 @@ FROM    (SELECT
                union all select TenantId, TranDistributionId from out_transactions where (TenantId,LastChangedById) in (select TenantId, UserId from tmp_user where _sys_updated_at > nvl(to_timestamp(nullif('${PREV_TMP_TS['out_transactions_attr#tmp_user']}',''),'yyyy-mm-dd hh24:mi:ss.us'),'2000-01-01') and _sys_updated_at <= to_timestamp('${LAST_TMP_TS['tmp_user']}','yyyy-mm-dd hh24:mi:ss.us'))
                union all select TenantId, TranDistributionId from out_transactions where (_sys_updated_at > nvl(to_timestamp(nullif('${PREV_TMP_TS['out_transactions_attr#out_transactions']}',''),'yyyy-mm-dd hh24:mi:ss.us'),'2000-01-01') and _sys_updated_at <= to_timestamp('${LAST_TMP_TS['out_transactions']}','yyyy-mm-dd hh24:mi:ss.us'))
               ) ids 
-        ) as SourceTable
-
-where RowNumber = 1
-
 ;
+
+select analyze_statistics('tmp_ids');
 
 truncate table wrk_out_transactions_attr;
 
@@ -165,38 +156,7 @@ from (
         t.TransactionId::VARCHAR(512) as "TransactionAttributeId",
         'false'::VARCHAR(512) as "IsBeginningBalance",
         t._sys_is_deleted
-        from (
-                select
-                trans.TenantId,
-                trans.TransactionTypeTranslation,
-                EncumbranceStatusTranslation,
-                AddedById,
-                DateAdded,
-                LastChangedById,
-                DateChanged,
-                BatchId,
-                PostStatusTranslation,
-                AccountId,
-                PostDate,
-                FiscalPeriodId,
-                GrantId,
-                trans.TranDistributionId,
-                TransactionId,
-                Projectid,
-                ClassId,
-                TDAmount,
-                TransactionCode1Id,
-                TransactionCode2Id,
-                TransactionCode3Id,
-                TransactionCode4Id,
-                TransactionCode5Id,
-                _sys_is_deleted,
-                _sys_hash,
-                _sys_updated_at
-                from out_transactions trans
-                INNER JOIN tmp_ids ids ON ids.TenantId = trans.TenantId
-                                      AND ids.TranDistributionId = trans.TranDistributionId
-                ) as t
+        from out_transactions t
                 join stg_csv_user_merge au
                     on t.AddedById = au.UserId
                     and t.TenantId = au.TenantId
@@ -223,6 +183,7 @@ from (
                 left join stg_csv_tableentry_merge c on t.ClassId = c.TableEntryId
                                                     and t.TenantId = c.TenantId
                                                     and c._sys_is_deleted = false
+      where (t.TenantId,t.TranDistributionId) in (select TenantId, TranDistributionId from tmp_ids)
     ) ij ;
 
 insert /*+ direct */ into wrk_out_transactions_attr
